@@ -9,6 +9,8 @@
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C
 
+#define BUTTON_PIN     2  // Button connected between digital pin 2 and GND
+
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // 8x12 pixels bitmap for Reva (the child character)
@@ -60,11 +62,13 @@ const unsigned char PROGMEM reva_jump[] = {
 // Game state
 enum GameState {
   STATE_INTRO,
-  STATE_ANIMATION
+  STATE_PLAYING,
+  STATE_GAMEOVER
 };
 
 GameState currentState = STATE_INTRO;
 unsigned long stateTimer = 0;
+int score = 0;
 
 // Reva physics
 const int revaX = 15;
@@ -90,7 +94,6 @@ Star stars[4] = {
 struct Cloud {
   float x;
   int y;
-  int w;
 };
 Cloud clouds[2] = {
   {10, 2},
@@ -103,17 +106,40 @@ struct House {
   int w;
   int h;
   bool active;
+  bool passed;
 };
 House houses[2] = {
-  {130, 16, 12, true},
-  {210, 20, 15, true}
+  {130, 16, 12, true, false},
+  {210, 20, 15, true, false}
 };
 
 // Animation properties
 int frameCounter = 0;
 
+// Reset the game to initial state
+void resetGame() {
+  revaY = 19;
+  revaVY = 0;
+  isJumping = false;
+  score = 0;
+  houses[0] = {130, 16, 12, true, false};
+  houses[1] = {210, 20, 15, true, false};
+  frameCounter = 0;
+}
+
+// Bounding Box Collision Detection
+bool checkCollision(int rx, int ry, int rw, int rh, int hx, int hy, int hw, int hh) {
+  return (rx < hx + hw &&
+          rx + rw > hx &&
+          ry < hy + hh &&
+          ry + rh > hy);
+}
+
 void setup() {
   Serial.begin(115200);
+
+  // Set up button pin with internal pullup
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   // Initialize display
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
@@ -141,22 +167,32 @@ void updateIntro() {
   // Center text (6 pixels wide per char under size 1 font)
   // "REVA'NIN ILK OYUNU" is 18 chars -> 18 * 6 = 108 pixels.
   // Center start x: (128 - 108) / 2 = 10
-  display.setCursor(10, 12);
+  display.setCursor(10, 7);
   display.print(F("REVA'NIN ILK OYUNU"));
+  
+  display.setCursor(19, 18);
+  display.print(F("BASLAMAK ICIN BAS"));
 
   display.display();
 
-  // Hold intro for 3 seconds
-  if (millis() - stateTimer > 3000) {
-    currentState = STATE_ANIMATION;
-    stateTimer = millis();
+  // Check if button is pressed (LOW = pressed due to INPUT_PULLUP)
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    resetGame();
+    currentState = STATE_PLAYING;
+    delay(200); // debounce delay
   }
 }
 
-void updateAnimation() {
+void updatePlaying() {
   frameCounter++;
 
-  // 1. Move Background Stars (Very slow)
+  // 1. Jump input check
+  if (digitalRead(BUTTON_PIN) == LOW && !isJumping) {
+    revaVY = jumpForce;
+    isJumping = true;
+  }
+
+  // 2. Move Background Stars (Very slow)
   for (int i = 0; i < 4; i++) {
     stars[i].x -= 0.15;
     if (stars[i].x < -2) {
@@ -164,7 +200,7 @@ void updateAnimation() {
     }
   }
 
-  // 2. Move Clouds (Medium speed)
+  // 3. Move Clouds (Medium speed)
   for (int i = 0; i < 2; i++) {
     clouds[i].x -= 0.35;
     if (clouds[i].x < -20) {
@@ -172,28 +208,23 @@ void updateAnimation() {
     }
   }
 
-  // 3. Move and Spawn Houses (Fast)
+  // 4. Move and Spawn Houses (Fast)
   for (int i = 0; i < 2; i++) {
     if (houses[i].active) {
       houses[i].x -= 1.8;
+      
+      // Check if house has successfully passed the player
+      if (!houses[i].passed && (houses[i].x + houses[i].w < revaX)) {
+        houses[i].passed = true;
+        score++;
+      }
+
       // Recycle/Respawn houses offscreen
       if (houses[i].x + houses[i].w < 0) {
         houses[i].x = SCREEN_WIDTH + random(10, 60);
         houses[i].w = random(12, 22);
         houses[i].h = random(10, 17);
-      }
-    }
-  }
-
-  // 4. Auto-Jump Trigger Logic
-  // Look ahead to see if any house is approaching and trigger jump
-  for (int i = 0; i < 2; i++) {
-    if (houses[i].active) {
-      // If a house is approaching Reva's X coord and Reva is on ground
-      float distToHouse = houses[i].x - revaX;
-      if (distToHouse > 0 && distToHouse < 32 && !isJumping) {
-        revaVY = jumpForce;
-        isJumping = true;
+        houses[i].passed = false;
       }
     }
   }
@@ -206,6 +237,23 @@ void updateAnimation() {
       revaY = 19;
       revaVY = 0;
       isJumping = false;
+    }
+  }
+
+  // 6. Check Collisions
+  for (int i = 0; i < 2; i++) {
+    if (houses[i].active) {
+      int hx = (int)houses[i].x;
+      int hw = houses[i].w;
+      int hh = houses[i].h;
+      int hy = 31 - hh;
+
+      if (checkCollision(revaX, (int)revaY, 8, 12, hx, hy, hw, hh)) {
+        currentState = STATE_GAMEOVER;
+        stateTimer = millis();
+        delay(200); // debounce delay
+        return;
+      }
     }
   }
 
@@ -222,7 +270,6 @@ void updateAnimation() {
 
   // Draw Clouds
   for (int i = 0; i < 2; i++) {
-    // Simple pixel-art cloud shape: a flat bottom with a rounded top
     int cx = (int)clouds[i].x;
     int cy = clouds[i].y;
     display.fillRoundRect(cx, cy, 14, 6, 2, SSD1306_WHITE);
@@ -269,7 +316,42 @@ void updateAnimation() {
   }
   display.drawBitmap(revaX, (int)revaY, currentSprite, 8, 12, SSD1306_WHITE);
 
+  // Draw Score in Top-Right
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  // Place score at top-right
+  display.setCursor(105, 2);
+  display.print(score);
+
   display.display();
+}
+
+void updateGameOver() {
+  display.clearDisplay();
+
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  display.setCursor(35, 4);
+  display.print(F("OYUN BITTI"));
+  
+  display.setCursor(32, 14);
+  display.print(F("SKOR: "));
+  display.print(score);
+
+  display.setCursor(17, 23);
+  display.print(F("TEKRAR ICIN BAS"));
+
+  display.display();
+
+  // Restart check (allow restart after 500ms has elapsed to prevent accidental instant restarts)
+  if (digitalRead(BUTTON_PIN) == LOW && (millis() - stateTimer > 500)) {
+    resetGame();
+    currentState = STATE_PLAYING;
+    delay(200); // debounce delay
+  }
 }
 
 void loop() {
@@ -277,8 +359,11 @@ void loop() {
     case STATE_INTRO:
       updateIntro();
       break;
-    case STATE_ANIMATION:
-      updateAnimation();
+    case STATE_PLAYING:
+      updatePlaying();
+      break;
+    case STATE_GAMEOVER:
+      updateGameOver();
       break;
   }
   delay(30); // ~33 FPS
