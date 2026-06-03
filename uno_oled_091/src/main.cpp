@@ -6,41 +6,280 @@
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels (0.91" OLED is 128x32)
 
-// Declaration for SSD1306 display connected using I2C
-// The pins for I2C are defined by the Wire-library.
-// On an arduino UNO:       A4(SDA), A5(SCL)
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C ///<<< See datasheet for Address; 0x3D or 0x3C
+#define SCREEN_ADDRESS 0x3C
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+// 8x12 pixels bitmap for Reva (the child character)
+const unsigned char PROGMEM reva_run1[] = {
+  0x18, //   00011000  (Head)
+  0x3c, //   00111100
+  0x3c, //   00111100
+  0x18, //   00011000
+  0x7e, //   01111110  (Torso/Arms)
+  0xdb, //   11011011  (Arms down)
+  0x3c, //   00111100
+  0x3c, //   00111100
+  0x24, //   00100100  (Legs run frame 1)
+  0x24, //   00100100
+  0x42, //   01000010
+  0x42  //   01000010
+};
+
+const unsigned char PROGMEM reva_run2[] = {
+  0x18, //   00011000  (Head)
+  0x3c, //   00111100
+  0x3c, //   00111100
+  0x18, //   00011000
+  0x7e, //   01111110  (Torso/Arms)
+  0xdb, //   11011011
+  0x3c, //   00111100
+  0x3c, //   00111100
+  0x18, //   00011000  (Legs run frame 2)
+  0x2c, //   00101100
+  0x4c, //   01001100
+  0x08  //   00001000
+};
+
+const unsigned char PROGMEM reva_jump[] = {
+  0x18, //   00011000  (Head)
+  0x3c, //   00111100
+  0x3c, //   00111100
+  0x18, //   00011000
+  0x7e, //   01111110  (Torso/Arms up/jump)
+  0xdb, //   11011011
+  0x3c, //   00111100
+  0x3c, //   00111100
+  0x42, //   01000010  (Legs bent for jump)
+  0x24, //   00100100
+  0x18, //   00011000
+  0x00  //   00000000
+};
+
+// Game state
+enum GameState {
+  STATE_INTRO,
+  STATE_ANIMATION
+};
+
+GameState currentState = STATE_INTRO;
+unsigned long stateTimer = 0;
+
+// Reva physics
+const int revaX = 15;
+float revaY = 19; // ground y coordinate is 19 (31 - 12)
+float revaVY = 0;
+const float gravity = 0.55;
+const float jumpForce = -5.2;
+bool isJumping = false;
+
+// Stars (background parallax)
+struct Star {
+  float x;
+  int y;
+};
+Star stars[4] = {
+  {30, 4},
+  {65, 8},
+  {95, 3},
+  {120, 6}
+};
+
+// Clouds (midground parallax)
+struct Cloud {
+  float x;
+  int y;
+  int w;
+};
+Cloud clouds[2] = {
+  {10, 2},
+  {80, 5}
+};
+
+// Houses (foreground obstacles)
+struct House {
+  float x;
+  int w;
+  int h;
+  bool active;
+};
+House houses[2] = {
+  {130, 16, 12, true},
+  {210, 20, 15, true}
+};
+
+// Animation properties
+int frameCounter = 0;
+
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
-  Serial.println(F("SSD1306 0.91\" OLED Test"));
-
-  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  // Initialize display
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
-    for(;;); // Don't proceed, loop forever
+    for(;;);
   }
 
-  // Clear the buffer
+  display.clearDisplay();
+  display.display();
+  
+  stateTimer = millis();
+}
+
+void updateIntro() {
   display.clearDisplay();
 
-  // Draw a text
-  display.setTextSize(1);      // Normal 1:1 pixel scale
-  display.setTextColor(SSD1306_WHITE); // Draw white text
-  display.setCursor(0, 0);     // Start at top-left corner
-  display.println(F("Reva Arduino Uno"));
-  display.setCursor(0, 16);    // Start at middle-left corner
-  display.println(F("0.91 OLED: Calisiyor"));
+  // Draw elegant border
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  display.drawRect(2, 2, SCREEN_WIDTH - 4, SCREEN_HEIGHT - 4, SSD1306_WHITE);
 
-  display.display(); // Show the buffer on the screen
-  Serial.println(F("Display updated successfully"));
+  // Text setup
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Center text (6 pixels wide per char under size 1 font)
+  // "REVA'NIN ILK OYUNU" is 18 chars -> 18 * 6 = 108 pixels.
+  // Center start x: (128 - 108) / 2 = 10
+  display.setCursor(10, 12);
+  display.print(F("REVA'NIN ILK OYUNU"));
+
+  display.display();
+
+  // Hold intro for 3 seconds
+  if (millis() - stateTimer > 3000) {
+    currentState = STATE_ANIMATION;
+    stateTimer = millis();
+  }
+}
+
+void updateAnimation() {
+  frameCounter++;
+
+  // 1. Move Background Stars (Very slow)
+  for (int i = 0; i < 4; i++) {
+    stars[i].x -= 0.15;
+    if (stars[i].x < -2) {
+      stars[i].x = SCREEN_WIDTH + 2;
+    }
+  }
+
+  // 2. Move Clouds (Medium speed)
+  for (int i = 0; i < 2; i++) {
+    clouds[i].x -= 0.35;
+    if (clouds[i].x < -20) {
+      clouds[i].x = SCREEN_WIDTH + 10;
+    }
+  }
+
+  // 3. Move and Spawn Houses (Fast)
+  for (int i = 0; i < 2; i++) {
+    if (houses[i].active) {
+      houses[i].x -= 1.8;
+      // Recycle/Respawn houses offscreen
+      if (houses[i].x + houses[i].w < 0) {
+        houses[i].x = SCREEN_WIDTH + random(10, 60);
+        houses[i].w = random(12, 22);
+        houses[i].h = random(10, 17);
+      }
+    }
+  }
+
+  // 4. Auto-Jump Trigger Logic
+  // Look ahead to see if any house is approaching and trigger jump
+  for (int i = 0; i < 2; i++) {
+    if (houses[i].active) {
+      // If a house is approaching Reva's X coord and Reva is on ground
+      float distToHouse = houses[i].x - revaX;
+      if (distToHouse > 0 && distToHouse < 32 && !isJumping) {
+        revaVY = jumpForce;
+        isJumping = true;
+      }
+    }
+  }
+
+  // 5. Apply Jump/Gravity Physics to Reva
+  if (isJumping) {
+    revaY += revaVY;
+    revaVY += gravity;
+    if (revaY >= 19) {
+      revaY = 19;
+      revaVY = 0;
+      isJumping = false;
+    }
+  }
+
+  // Draw Screen
+  display.clearDisplay();
+
+  // Draw ground line
+  display.drawFastHLine(0, 31, SCREEN_WIDTH, SSD1306_WHITE);
+
+  // Draw Stars
+  for (int i = 0; i < 4; i++) {
+    display.drawPixel((int)stars[i].x, stars[i].y, SSD1306_WHITE);
+  }
+
+  // Draw Clouds
+  for (int i = 0; i < 2; i++) {
+    // Simple pixel-art cloud shape: a flat bottom with a rounded top
+    int cx = (int)clouds[i].x;
+    int cy = clouds[i].y;
+    display.fillRoundRect(cx, cy, 14, 6, 2, SSD1306_WHITE);
+    display.fillRoundRect(cx + 4, cy - 2, 8, 4, 2, SSD1306_WHITE);
+  }
+
+  // Draw Houses
+  for (int i = 0; i < 2; i++) {
+    if (houses[i].active) {
+      int hx = (int)houses[i].x;
+      int hw = houses[i].w;
+      int hh = houses[i].h;
+      int hy = 31 - hh;
+
+      // Draw the house body
+      display.drawRect(hx, hy, hw, hh, SSD1306_WHITE);
+      
+      // Draw a door
+      display.fillRect(hx + (hw / 2) - 2, hy + hh - 6, 4, 6, SSD1306_WHITE);
+
+      // Draw a window
+      if (hw > 14) {
+        display.drawRect(hx + 3, hy + 3, 3, 3, SSD1306_WHITE);
+        display.drawRect(hx + hw - 6, hy + 3, 3, 3, SSD1306_WHITE);
+      }
+      
+      // Draw roof lines (triangular roof outline)
+      display.drawLine(hx, hy, hx + (hw / 2), hy - 4, SSD1306_WHITE);
+      display.drawLine(hx + (hw / 2), hy - 4, hx + hw - 1, hy, SSD1306_WHITE);
+    }
+  }
+
+  // Draw Reva Sprite
+  const unsigned char* currentSprite;
+  if (isJumping) {
+    currentSprite = reva_jump;
+  } else {
+    // Toggle frame every 6 ticks
+    if ((frameCounter / 6) % 2 == 0) {
+      currentSprite = reva_run1;
+    } else {
+      currentSprite = reva_run2;
+    }
+  }
+  display.drawBitmap(revaX, (int)revaY, currentSprite, 8, 12, SSD1306_WHITE);
+
+  display.display();
 }
 
 void loop() {
-  // Put your main code here, to run repeatedly:
+  switch (currentState) {
+    case STATE_INTRO:
+      updateIntro();
+      break;
+    case STATE_ANIMATION:
+      updateAnimation();
+      break;
+  }
+  delay(30); // ~33 FPS
 }
