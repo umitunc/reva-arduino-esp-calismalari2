@@ -74,8 +74,13 @@ int score = 0;
 const int revaX = 15;
 float revaY = 19; // ground y coordinate is 19 (31 - 12)
 float revaVY = 0;
-const float gravity = 0.55;
-const float jumpForce = -5.2;
+
+// High-feel jump physics settings
+const float gravity = 0.58;         // Standard gravity
+const float holdGravity = 0.28;     // Reduced gravity when button is held
+const float initialJumpForce = -4.8; // High initial jump impulse
+const int MAX_JUMP_HOLD = 14;       // Max frames you can float/hold the jump
+int jumpHoldCounter = 0;
 bool isJumping = false;
 
 // Stars (background parallax)
@@ -121,6 +126,7 @@ void resetGame() {
   revaY = 19;
   revaVY = 0;
   isJumping = false;
+  jumpHoldCounter = 0;
   score = 0;
   houses[0] = {130, 16, 12, true, false};
   houses[1] = {210, 20, 15, true, false};
@@ -164,9 +170,7 @@ void updateIntro() {
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
 
-  // Center text (6 pixels wide per char under size 1 font)
-  // "REVA'NIN ILK OYUNU" is 18 chars -> 18 * 6 = 108 pixels.
-  // Center start x: (128 - 108) / 2 = 10
+  // Center text
   display.setCursor(10, 7);
   display.print(F("REVA'NIN ILK OYUNU"));
   
@@ -175,7 +179,7 @@ void updateIntro() {
 
   display.display();
 
-  // Check if button is pressed (LOW = pressed due to INPUT_PULLUP)
+  // Check if button is pressed
   if (digitalRead(BUTTON_PIN) == LOW) {
     resetGame();
     currentState = STATE_PLAYING;
@@ -186,10 +190,13 @@ void updateIntro() {
 void updatePlaying() {
   frameCounter++;
 
-  // 1. Jump input check
-  if (digitalRead(BUTTON_PIN) == LOW && !isJumping) {
-    revaVY = jumpForce;
-    isJumping = true;
+  // 1. Jump Input Trigger
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    if (!isJumping) {
+      revaVY = initialJumpForce;
+      isJumping = true;
+      jumpHoldCounter = 0;
+    }
   }
 
   // 2. Move Background Stars (Very slow)
@@ -223,16 +230,24 @@ void updatePlaying() {
       if (houses[i].x + houses[i].w < 0) {
         houses[i].x = SCREEN_WIDTH + random(10, 60);
         houses[i].w = random(12, 22);
-        houses[i].h = random(10, 17);
+        houses[i].h = random(10, 17); // Max height is 17 (31-17 = y=14)
         houses[i].passed = false;
       }
     }
   }
 
-  // 5. Apply Jump/Gravity Physics to Reva
+  // 5. Apply Jump/Gravity Physics (Hold to float longer)
   if (isJumping) {
     revaY += revaVY;
-    revaVY += gravity;
+    
+    // If holding button down while still ascending, apply lower gravity for a floatier jump
+    if (digitalRead(BUTTON_PIN) == LOW && revaVY < 0 && jumpHoldCounter < MAX_JUMP_HOLD) {
+      revaVY += holdGravity;
+      jumpHoldCounter++;
+    } else {
+      revaVY += gravity;
+    }
+
     if (revaY >= 19) {
       revaY = 19;
       revaVY = 0;
@@ -319,7 +334,6 @@ void updatePlaying() {
   // Draw Score in Top-Right
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  // Place score at top-right
   display.setCursor(105, 2);
   display.print(score);
 
@@ -346,7 +360,7 @@ void updateGameOver() {
 
   display.display();
 
-  // Restart check (allow restart after 500ms has elapsed to prevent accidental instant restarts)
+  // Restart check
   if (digitalRead(BUTTON_PIN) == LOW && (millis() - stateTimer > 500)) {
     resetGame();
     currentState = STATE_PLAYING;
